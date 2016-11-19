@@ -30,6 +30,7 @@
 #import "NSString+MKNKAdditions.h"
 
 @class MKNetworkHost;
+@class MKCache;
 
 @protocol MKNetworkHostDelegate <NSObject>
 
@@ -66,6 +67,8 @@
 
 @property (weak) id <MKNetworkHostDelegate> delegate;
 @property (copy) void (^backgroundSessionCompletionHandler)(void);
+
+@property (readonly)MKCache *dataCache;
 
 // You can override this method to tweak request creation
 // But ensure that you call super
@@ -108,6 +111,7 @@
  * Reload with cache even if cache is not stale
  */
 
+-(void) startImageRequest:(MKNetworkRequest*) request;
 -(void) startRequest:(MKNetworkRequest*) request;
 -(void) startUploadRequest:(MKNetworkRequest*) request;
 -(void) startDownloadRequest:(MKNetworkRequest*) request;

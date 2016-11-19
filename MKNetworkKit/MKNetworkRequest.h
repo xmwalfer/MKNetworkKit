@@ -26,6 +26,9 @@
 
 #import <Foundation/Foundation.h>
 
+#define WS(weakSelf)  __weak __typeof(&*self)weakSelf = self;
+#define WP(weakPoiner, obj)  __weak __typeof(&*obj)weakPoiner = obj;
+
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
 #endif
@@ -89,6 +92,13 @@ typedef enum {
 @property (readonly) NSURLSessionTask *task;
 @property (readonly) CGFloat progress;
 @property (readonly) id responseAsJSON;
+
+// progress image
+- (void)parepareForProgressImage;
+- (void)didReceiveData:(NSData *)data;
+- (void)requestComplete;
+-(void) responseAsProgressImage:(void (^)(UIImage *))complete;
+
 
 #if TARGET_OS_IPHONE
 -(UIImage*) decompressedResponseImageOfSize:(CGSize) size;

@@ -46,7 +46,7 @@ NSString *const kMKCacheDefaultDirectoryName = @"com.mknetworkkit.mkcache";
 -(void) setProgressValue:(CGFloat) updatedValue;
 @end
 
-@interface MKNetworkHost (/*Private Methods*/) <NSURLSessionDelegate>
+@interface MKNetworkHost (/*Private Methods*/) <NSURLSessionDelegate, NSURLSessionDataDelegate>
 
 @property (readonly) NSURLSession *defaultSession;
 @property (readonly) NSURLSession *ephemeralSession;
@@ -335,6 +335,27 @@ NSString *const kMKCacheDefaultDirectoryName = @"com.mknetworkkit.mkcache";
   request.state = MKNKRequestStateStarted;
 }
 
+-(void) startImageRequest:(MKNetworkRequest*) request{
+    
+    if(!request || !request.request) {
+        
+        NSLog(@"Request is nil, check your URL and other parameters you use to build your request");
+        return;
+    }
+    
+    NSURLSession *sessionToUse = self.defaultSession;
+    
+    NSURLSessionTask *task = [sessionToUse dataTaskWithRequest:request.request];
+    
+    request.task = task;
+    
+    dispatch_sync(self.runningTasksSynchronizingQueue, ^{
+        [self.activeTasks addObject:request];
+    });
+    
+    request.state = MKNKRequestStateStarted;
+}
+
 -(MKNetworkRequest*) requestWithURLString:(NSString*) urlString {
   
   MKNetworkRequest *request = [[MKNetworkRequest alloc] initWithURLString:urlString
@@ -424,6 +445,40 @@ NSString *const kMKCacheDefaultDirectoryName = @"com.mknetworkkit.mkcache";
   return completedRequest.error;
 }
 
+#pragma mark NSURLSessionDataDelegate
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+didReceiveResponse:(NSURLResponse *)response
+ completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler{
+        [self.activeTasks enumerateObjectsUsingBlock:^(MKNetworkRequest *request, NSUInteger idx, BOOL *stop) {
+            
+            if([request.task isEqual:dataTask]) {
+                request.response = (NSHTTPURLResponse*) dataTask.response;
+                [request parepareForProgressImage];
+                [request setProgressValue:0];
+                *stop = YES;
+            }
+        }];
+    completionHandler(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data{
+    if (session != [self backgroundSession]) {
+        [self.activeTasks enumerateObjectsUsingBlock:^(MKNetworkRequest *request, NSUInteger idx, BOOL *stop) {
+            
+            if([request.task isEqual:dataTask]) {
+                [request didReceiveData:data];
+                NSInteger expected = request.response.expectedContentLength > 0 ? (NSInteger)request.response.expectedContentLength : 0;
+                if (expected > 0)
+                    [request setProgressValue:(request.responseData.length*1.0/expected)];
+                else
+                    [request setProgressValue:.0];
+                *stop = YES;
+            }
+        }];
+    }
+}
 #pragma mark -
 #pragma mark NSURLSession Authentication delegates
 

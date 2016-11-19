@@ -8,12 +8,23 @@
 
 #import <objc/runtime.h>
 
-#import "UIImageView+MKNKAdditions.h"
-
 #import "MKNetworkKit.h"
+
+#import "UIImageView+MKNKAdditions.h"
+#import "MKImageCache.h"
+
+@interface MKNetworkRequest (/*Private Methods*/)
+@property (readwrite) NSHTTPURLResponse *response;
+@property (readwrite) NSData *responseData;
+@property (readwrite) NSError *error;
+@property (readwrite) MKNKRequestState state;
+@property (readwrite) NSURLSessionTask *task;
+-(void) setProgressValue:(CGFloat) updatedValue;
+@end
 
 static MKNetworkHost *imageHost;
 static char imageFetchRequestKey;
+static char imageFetchUrlKey;
 
 const float kFromCacheAnimationDuration = 0.0f;
 const float kFreshLoadAnimationDuration = 0.25f;
@@ -21,83 +32,163 @@ const float kFreshLoadAnimationDuration = 0.25f;
 @implementation UIImageView (MKNKAdditions)
 
 +(void) initialize {
-  
-  imageHost = [[MKNetworkHost alloc] init];
-  [imageHost enableCache];
-}
-
-+(MKNetworkRequest*) cacheImageFromURLString:(NSString*) imageUrlString {
-  
-  return [UIImageView cacheImageFromURLString:imageUrlString decompressedImageSize:CGSizeZero];
-}
-
-+(MKNetworkRequest*) cacheImageFromURLString:(NSString*) imageUrlString decompressedImageSize:(CGSize) size {
-  
-  MKNetworkRequest *request = [imageHost requestWithURLString:imageUrlString];
-  
-  if(!CGSizeEqualToSize(size, CGSizeZero)) {
-    
-    [request addCompletionHandler:^(MKNetworkRequest *completedRequest) {
-      
-      [completedRequest decompressedResponseImageOfSize:size];
-    }];
-  }
-  return request;
+    imageHost = [[MKNetworkHost alloc] init];
+    [imageHost enableCache];
 }
 
 -(MKNetworkRequest*) imageFetchRequest {
-  
-  return (MKNetworkRequest*) objc_getAssociatedObject(self, &imageFetchRequestKey);
+    return (MKNetworkRequest*) objc_getAssociatedObject(self, &imageFetchRequestKey);
 }
 
 -(void) setImageFetchRequest:(MKNetworkRequest *)imageFetchRequest {
-  
-  objc_setAssociatedObject(self, &imageFetchRequestKey, imageFetchRequest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [[self imageFetchRequest] cancel];
+    objc_setAssociatedObject(self, &imageFetchRequestKey, imageFetchRequest, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+- (NSString *)imageUrl{
+    return (NSString *) objc_getAssociatedObject(self, &imageFetchUrlKey);
+}
+- (void)setImageUrl:(NSString *)url{
+    objc_setAssociatedObject(self, &imageFetchUrlKey, url, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
--(MKNetworkRequest*) loadImageFromURLString:(NSString*) imageUrlString {
-  
-  return [self loadImageFromURLString:imageUrlString placeHolderImage:nil animated:YES];
++ (BOOL)isImageCached:(NSString*) imageUrlString{
+    if (!imageUrlString)
+        return NO;
+    return [[MKImageCache sharedImageCache] diskImageExistsWithKey:imageUrlString];
+}
++ (UIImage *)cachedImagewithURLString:(NSString*) imageUrlString{
+    if (!imageUrlString)
+        return nil;
+    return [[MKImageCache sharedImageCache] imageFromDiskCacheForKey:imageUrlString];
+}
++(void)updateCacheImage:(NSData *)data withURLString:(NSString*) imageUrlString{
+    if (!data || !imageUrlString)
+        return;
+//    UIImage *image = [UIImage imageWithData:data];
+//    [[MKImageCache sharedImageCache] storeImage:image forKey:imageUrlString toDisk:YES];
+    [[MKImageCache sharedImageCache] storeImageDataToDisk:data forKey:imageUrlString];
+}
++ (MKNetworkRequest *)preloadFromURLString:(NSString*) imageUrlString onComplete:(MKNKHandler) completionHandler{
+    if ([self isImageCached:imageUrlString])
+        return nil;
+    
+    NSString *cachePath = [[MKImageCache sharedImageCache] defaultCachePathForKey:imageUrlString];
+    MKNetworkRequest *req = [imageHost requestWithURLString:imageUrlString];
+    req.downloadPath = cachePath;
+    [req addCompletionHandler:^(MKNetworkRequest *completedRequest) {
+        BOOL bDictinary = NO;
+        BOOL bExist = NO;
+        bExist = [[NSFileManager defaultManager] fileExistsAtPath:cachePath isDirectory:&bDictinary];
+        if (!bExist && !bDictinary && completedRequest.responseData)
+            [[MKImageCache sharedImageCache] storeImageDataToDisk:completedRequest.responseData forKey:imageUrlString onComplete:^(NSString *key, UIImage *image) {
+                if (completionHandler)
+                    completionHandler(completedRequest);
+            }];
+        else{
+            if (completionHandler)
+                completionHandler(completedRequest);
+        }
+    }];
+    req.doNotCache = YES;
+    if (req)
+        [imageHost startRequest:req];
+    return req;
+}
+
+-(MKNetworkRequest *)loadImageFromURLString:(NSString*) imageUrlString onProgress:(MKNKHandler)progressHandler andComplete:(void(^)(UIImage *image, MKImageCacheType cacheType, NSString *imageUrl, NSError *error)) completionHandlerInMainThread{
+    if ([imageUrlString isEqualToString:[self imageUrl]]){
+        if (self.image || self.imageFetchRequest.state == MKNKRequestStateStarted) {
+            return [self imageFetchRequest];
+        }
+    }
+    
+    [self.imageFetchRequest cancel];
+    WS(pself);
+    @synchronized (self) {
+        [self setImageUrl:imageUrlString];
+    }
+    
+    if ([UIImageView isImageCached:imageUrlString]) {
+        [[MKImageCache sharedImageCache] queryDiskCacheForKey:imageUrlString done:^(UIImage *image, MKImageCacheType cacheType) {
+            if (![[pself imageUrl] isEqualToString:imageUrlString])
+                return;
+            if (image) {
+                pself.image = image;
+                if (completionHandlerInMainThread)
+                    completionHandlerInMainThread(image, cacheType, imageUrlString, nil);
+            }else{
+                [pself loadImageFromURLString:imageUrlString onProgress:progressHandler andComplete:completionHandlerInMainThread];
+            }
+        }];
+        return nil;
+    }else{
+        MKNetworkRequest *req = [imageHost requestWithURLString:imageUrlString];
+        [req addDownloadProgressChangedHandler:^(MKNetworkRequest *completedRequest) {
+            if (![[pself imageUrl] isEqualToString:imageUrlString])
+                return;
+            if (progressHandler)
+                progressHandler(completedRequest);
+        }];
+        [req addCompletionHandler:^(MKNetworkRequest *completedRequest) {
+            if (![[pself imageUrl] isEqualToString:imageUrlString])
+                return;
+            if (!completedRequest.error && completedRequest.responseData)
+                [[MKImageCache sharedImageCache] storeImageDataToDisk:completedRequest.responseData
+                                                               forKey:imageUrlString
+                                                           onComplete:^(NSString *key, UIImage *image) {
+                    if (completionHandlerInMainThread)
+                        completionHandlerInMainThread(image, MKImageCacheTypeNetwork, imageUrlString, completedRequest.error);
+                    [pself setImageFetchRequest:nil];
+                }];
+            else{
+                [[MKImageCache sharedImageCache] queryDiskCacheForKey:imageUrlString done:^(UIImage *image, MKImageCacheType cacheType) {
+                    if (completionHandlerInMainThread)
+                        completionHandlerInMainThread(image, MKImageCacheTypeNetwork, imageUrlString, completedRequest.error);
+                    [pself setImageFetchRequest:nil];
+                }];
+            }
+        }];
+        req.doNotCache = YES;
+        if (req)
+            [imageHost startImageRequest:req];
+        [self setImageFetchRequest:req];
+        return req;
+    }
 }
 
 -(MKNetworkRequest*) loadImageFromURLString:(NSString*) imageUrlString placeHolderImage:(UIImage*) placeHolderImage animated:(BOOL) animated {
-  
-  if(placeHolderImage)
-    self.image = placeHolderImage;
-  
-  [self.imageFetchRequest cancel];  
-  
-  self.imageFetchRequest = [imageHost requestWithURLString:imageUrlString];
-  [self.imageFetchRequest addCompletionHandler:^(MKNetworkRequest *completedRequest) {
+    if([UIImageView isImageCached:imageUrlString])
+        self.image = placeHolderImage;
     
-    if(completedRequest.responseAvailable) {
-      
-      CGFloat animationDuration = completedRequest.isCachedResponse?kFromCacheAnimationDuration:kFreshLoadAnimationDuration;
-      
-      UIImage *decompressedImage = [completedRequest decompressedResponseImageOfSize:self.frame.size];
-      
-      dispatch_async(dispatch_get_main_queue(), ^{
+    return [self loadImageFromURLString:imageUrlString onProgress:^(MKNetworkRequest *completedRequest) {
         
-        if(animated) {
-          [UIView transitionWithView:self.superview
-                            duration:animationDuration
-                             options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
-                          animations:^{
-                            self.image = decompressedImage;
-                          } completion:nil];
+    } andComplete:^(UIImage *image, MKImageCacheType cacheType, NSString *imageUrl, NSError *error) {
+        if(image) {
+            CGFloat animationDuration = (cacheType == MKImageCacheTypeNetwork)?kFreshLoadAnimationDuration:kFromCacheAnimationDuration;
+            if(animated) {
+                [UIView transitionWithView:self.superview
+                                  duration:animationDuration
+                                   options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                                animations:^{
+                                    self.image = image;
+                                } completion:nil];
+            } else {
+                self.image = image;
+            }
         } else {
-          self.image = decompressedImage;
+            NSLog(@"Request: %@ failed with error: %@", imageUrlString, error);
         }
+    }];
+}
 
-      });
-    } else {
-      if(completedRequest.state == MKNKRequestStateError)
-        NSLog(@"Request: %@ failed with error: %@", completedRequest, completedRequest.error);
-    }
-  }];
-  
-  [imageHost startRequest:self.imageFetchRequest];
-  
-  return self.imageFetchRequest;
+-(MKNetworkRequest*) loadImageFromURLString:(NSString*) imageUrlString {
+    WS(pself);
+    return [self loadImageFromURLString:imageUrlString onProgress:^(MKNetworkRequest *completedRequest) {
+        [completedRequest responseAsProgressImage:^(UIImage *image) {
+            pself.image = image;
+        }];
+    } andComplete:^(UIImage *image, MKImageCacheType cacheType, NSString *imageUrl, NSError *error) {
+        pself.image = image;
+    }];
 }
 @end

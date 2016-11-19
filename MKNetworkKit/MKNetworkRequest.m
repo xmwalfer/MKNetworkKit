@@ -33,7 +33,21 @@
 static NSInteger numberOfRunningOperations;
 static NSString * kBoundary = @"0xKhTmLbOuNdArY";
 
-@interface MKNetworkRequest (/*Private Methods*/)
+@interface MKNetworkRequest (/*Private Methods*/){
+    /// Image source for progressive display
+    CGImageSourceRef _imageSource;
+    NSMutableData *_tempData;
+    /// Width of the downloaded image
+    int _imageWidth;
+    /// Height of the downloaded image
+    int _imageHeight;
+    /// Expected image size
+    long long _expectedSize;
+    /// Image orientation
+    UIImageOrientation _imageOrientation;
+    
+    dispatch_queue_t runningTasksSynchronizingQueue;
+}
 @property NSMutableArray *stateArray;
 @property NSString *urlString;
 @property NSData *bodyData;
@@ -86,6 +100,9 @@ static NSString * kBoundary = @"0xKhTmLbOuNdArY";
     
     self.attachedData = [NSMutableArray array];
     self.attachedFiles = [NSMutableArray array];
+      
+      NSString *str = [NSString stringWithFormat:@"com.mknetworkkit-%@", @(self.hash)];
+      runningTasksSynchronizingQueue = dispatch_queue_create([str UTF8String], DISPATCH_QUEUE_SERIAL);
   }
   
   return self;
@@ -498,7 +515,7 @@ static NSString * kBoundary = @"0xKhTmLbOuNdArY";
     }];
   } else if(state == MKNKRequestStateCompleted ||
             state == MKNKRequestStateError) {
-
+      [self requestComplete];
     [self decrementRunningOperations];
     [self.completionHandlers enumerateObjectsUsingBlock:^(MKNKHandler handler, NSUInteger idx, BOOL *stop) {
       
@@ -514,6 +531,154 @@ static NSString * kBoundary = @"0xKhTmLbOuNdArY";
 #pragma mark Response formatting helpers
 
 #if TARGET_OS_IPHONE
+CGContextRef _CreateARGBBitmapContext(const size_t width, const size_t height, const size_t bytesPerRow, BOOL withAlpha)
+{
+    /// Use the generic RGB color space
+    /// We avoid the NULL check because CGColorSpaceRelease() NULL check the value anyway, and worst case scenario = fail to create context
+    /// Create the bitmap context, we want pre-multiplied ARGB, 8-bits per component
+    CGImageAlphaInfo alphaInfo = (withAlpha ? kCGImageAlphaPremultipliedFirst : kCGImageAlphaNoneSkipFirst);
+    CGContextRef bmContext = CGBitmapContextCreate(NULL, width, height, 8/*Bits per component*/, bytesPerRow, CGColorSpaceCreateDeviceRGB(), kCGBitmapByteOrderDefault | alphaInfo);
+    
+    return bmContext;
+}
+
+BOOL _ImageHasAlpha(CGImageRef imageRef)
+{
+    CGImageAlphaInfo alpha = CGImageGetAlphaInfo(imageRef);
+    BOOL hasAlpha = (alpha == kCGImageAlphaFirst || alpha == kCGImageAlphaLast || alpha == kCGImageAlphaPremultipliedFirst || alpha == kCGImageAlphaPremultipliedLast);
+    
+    return hasAlpha;
+}
+-(CGImageRef)createTransitoryImage:(CGImageRef)partialImage
+{
+    const size_t partialHeight = CGImageGetHeight(partialImage);
+    CGContextRef bmContext = _CreateARGBBitmapContext((size_t)_imageWidth, (size_t)_imageHeight, (size_t)_imageWidth * 4, _ImageHasAlpha(partialImage));
+    if (!bmContext)
+        return NULL;
+    CGContextDrawImage(bmContext, (CGRect){.origin.x = 0.0f, .origin.y = 0.0f, .size.width = _imageWidth, .size.height = partialHeight}, partialImage);
+    CGImageRef goodImageRef = CGBitmapContextCreateImage(bmContext);
+    CGContextRelease(bmContext);
+    return goodImageRef;
+}
+
++(UIImageOrientation)exifOrientationToiOSOrientation:(int)exifOrientation
+{
+    UIImageOrientation orientation = UIImageOrientationUp;
+    switch (exifOrientation)
+    {
+        case 1:
+            orientation = UIImageOrientationUp;
+            break;
+        case 3:
+            orientation = UIImageOrientationDown;
+            break;
+        case 8:
+            orientation = UIImageOrientationLeft;
+            break;
+        case 6:
+            orientation = UIImageOrientationRight;
+            break;
+        case 2:
+            orientation = UIImageOrientationUpMirrored;
+            break;
+        case 4:
+            orientation = UIImageOrientationDownMirrored;
+            break;
+        case 5:
+            orientation = UIImageOrientationLeftMirrored;
+            break;
+        case 7:
+            orientation = UIImageOrientationRightMirrored;
+            break;
+        default:
+            break;
+    }
+    return orientation;
+}
+- (UIImage *)_responseAsProgressImage{
+    @synchronized (self) {
+        if (!_imageSource || _tempData.length == 0)
+            return nil;
+        
+        const NSUInteger len = [_tempData length];
+        CGImageSourceUpdateData(_imageSource, (__bridge CFDataRef)_tempData, (len == _expectedSize) ? true : false);
+        
+        if (_imageHeight > 0 && _imageWidth > 0)
+        {
+            CGImageRef cgImage = CGImageSourceCreateImageAtIndex(_imageSource, 0, NULL);
+            if (cgImage)
+            {
+                CGImageRef imgTmp = [self createTransitoryImage:cgImage];
+                if (imgTmp)
+                {
+                    __block UIImage* img = [[UIImage alloc] initWithCGImage:imgTmp scale:1.0f orientation:_imageOrientation];
+                    CGImageRelease(imgTmp);
+                    
+                    return img;
+                }
+                CGImageRelease(cgImage);
+            }
+        }
+        else
+        {
+            CFDictionaryRef dic = CGImageSourceCopyPropertiesAtIndex(_imageSource, 0, NULL);
+            if (dic)
+            {
+                CFTypeRef val = CFDictionaryGetValue(dic, kCGImagePropertyPixelHeight);
+                if (val)
+                    CFNumberGetValue(val, kCFNumberIntType, &_imageHeight);
+                val = CFDictionaryGetValue(dic, kCGImagePropertyPixelWidth);
+                if (val)
+                    CFNumberGetValue(val, kCFNumberIntType, &_imageWidth);
+                
+                val = CFDictionaryGetValue(dic, kCGImagePropertyOrientation);
+                if (val)
+                {
+                    int orientation; // Note: This is an EXIF int for orientation, a number between 1 and 8
+                    CFNumberGetValue(val, kCFNumberIntType, &orientation);
+                    _imageOrientation = [MKNetworkRequest exifOrientationToiOSOrientation:orientation];
+                }
+                else
+                    _imageOrientation = UIImageOrientationUp;
+                CFRelease(dic);
+            }
+        }
+        return nil;
+    }
+}
+- (void)parepareForProgressImage{
+    dispatch_sync(runningTasksSynchronizingQueue, ^{
+        _imageSource = CGImageSourceCreateIncremental(NULL);
+        _imageWidth = _imageHeight = -1;
+        _expectedSize = [self.response expectedContentLength];
+        _tempData = [[NSMutableData alloc] initWithCapacity:(NSUInteger)((_expectedSize>0)?_expectedSize:0)];
+    });
+}
+- (void)didReceiveData:(NSData *)data{
+    dispatch_async(runningTasksSynchronizingQueue, ^{
+        [_tempData appendData:data];
+    });
+}
+- (void)requestComplete{
+    dispatch_sync(runningTasksSynchronizingQueue, ^{
+        if (!self.responseData && _tempData.length > 0)
+            self.responseData = _tempData;
+        _tempData = nil;
+        if (_imageSource)
+            CFRelease(_imageSource);
+        _imageSource = nil;
+    });
+}
+-(void) responseAsProgressImage:(void (^)(UIImage *))complete{
+    WS(pself);
+    dispatch_async(runningTasksSynchronizingQueue, ^{
+        UIImage *image =  [pself _responseAsProgressImage];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (complete)
+                complete(image);
+        });
+    });
+}
 -(UIImage*) responseAsImage {
   
   static CGFloat scale = 2.0f;

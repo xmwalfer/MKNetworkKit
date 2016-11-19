@@ -20,9 +20,13 @@
 
 #if TARGET_OS_IPHONE
 #import "UIAlertView+MKNKAdditions.h"
-#elif TARGET_OS_MAC
-#import "NSAlertView+MKNKAdditions.h"
 #endif
+
+#import "Extensions/NSDate+RFC1123.h"
+#import "Extensions/NSDictionary+MKNKAdditions.h"
+#import "Extensions/NSHTTPURLResponse+MKNKAdditions.h"
+#import "Extensions/NSMutableDictionary+MKNKAdditions.h"
+#import "Extensions/NSString+MKNKAdditions.h"
 
 #ifdef __OBJC_GC__
 #error MKNetworkKit does not support Objective-C Garbage Collection
