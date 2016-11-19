@@ -1,8 +1,24 @@
-This is version 2.0 of MKNetworkKit. Version 2 is based on NSURLSession and NSURLConfiguration. 
+This is optimize base on version 2.0 of MKNetworkKit. Version 2 is based on NSURLSession and NSURLConfiguration. 
 
-Version 1.x of MKNetworkKit is deprecated as NSURLConnection is deprecated in iOS 9 and is not available on tvOS.
+![](baseline.gif)
+![](progressive.gif)
 
-A Swift version is available [here] (https://github.com/MugunthKumar/MKNetworkKit-Swift)
+
+###What's New?
+* Support Image Disk cache And Proload feature Which can replace SDWebImage.
+* Support Image Memory cache for LOCAL images.
+* Support Progressive JPEG load Which just like 'Concorde' do.
+
+
+###How to Use
+```
+// load image from URL or local path
+[imageview1 loadImageFromURLString:url];
+
+// remove local cache from memory and disk
+[[MKImageCache sharedImageCache] removeImageForKey:url];
+```
+
 
 ###Why MKNetworkKit?
 
